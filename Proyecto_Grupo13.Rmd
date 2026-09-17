@@ -1,0 +1,658 @@
+---
+title: "Proyecto de Mejoramiento - Grupo 12"
+author: "Jonathan Paute"
+date: "2026-09-14"
+output:
+  word_document: default
+  html_document: default
+  pdf_document: default
+---
+
+```{r, warning=FALSE}
+library(haven)
+library(tidyverse)
+library(scales)
+library(grid)
+library(ggtext)
+library(patchwork)
+library(showtext)
+library(openxlsx)
+library(survey)
+library(srvyr)
+```
+
+# Datos
+
+```{r, warning=FALSE}
+ruta <- file.path("Datos", "Bases_trabajo.RData")
+load(ruta)
+datos_hogar <- ENIGHUR2025_HOGARES_AGREGADOS
+```
+
+# Recodificación de variables con etiquetas
+
+```{r, warning=FALSE}
+datos_hogar$Nacional <- "Nacional"
+
+datos_hogar$AREA <- factor(datos_hogar$AREA,
+       levels = 1:2, labels = names(attr(datos_hogar$AREA, "labels")))
+
+datos_hogar$PROVINCIA <- factor(datos_hogar$PROVINCIA,
+       levels = 1:24, labels = names(attr(datos_hogar$PROVINCIA, "labels")))
+
+datos_hogar$cant_auto <- factor(datos_hogar$cant_auto,
+       levels = 1:4, labels = names(attr(datos_hogar$cant_auto, "labels")))
+
+datos_hogar$cant_urb <- factor(datos_hogar$cant_urb,
+       levels = 1:5, labels = names(attr(datos_hogar$cant_urb, "labels")))
+
+datos_hogar$REGION <- factor(datos_hogar$REGION,
+       levels = 1:4, labels = names(attr(datos_hogar$REGION, "labels")))
+
+# Verifica que estos nombres calcen exactamente con tus etiquetas:
+# levels(datos_hogar$PROVINCIA) ; levels(datos_hogar$cant_auto) ; levels(datos_hogar$REGION)
+```
+
+# Variables cuantitativas
+
+```{r, warning=FALSE}
+datos_hogar$ing_cor_per[which(is.na(datos_hogar$ing_cor_per))] <- 0
+datos_hogar$gas_gru_cor[which(is.na(datos_hogar$gas_gru_cor))] <- 0
+```
+
+# Deciles y cuartiles (calculados sobre TODO el dataset, por tipo de territorio)
+
+Igual que en el boceto original: los deciles se calculan sobre el
+dataset completo, desagregados dentro de cada grupo, para NO perder la
+estructura del diseño muestral (estratos/UPM) al momento de calcular
+error estándar y CV más adelante.
+
+```{r, warning=FALSE}
+source(file.path("Scripts auxiliares", "Deciles.R"))
+
+# Nacional (un solo grupo = todo el dataset)
+datos_hogar <- calcular_ntiles_spss(
+  data = datos_hogar, variable = "ing_cor_per", nombre_decil = "dec_nacional",
+  peso = "Fexp", grupos = 10, desempate = "Identif_hog", mostrar_control = FALSE)
+datos_hogar <- calcular_ntiles_spss(
+  data = datos_hogar, variable = "ing_cor_per", nombre_decil = "cua_nacional",
+  peso = "Fexp", grupos = 4, desempate = "Identif_hog", mostrar_control = FALSE)
+
+# Por región (para Sierra)
+datos_hogar <- calcular_ntiles_spss_por_grupo(
+  data = datos_hogar, variable = "ing_cor_per", grupo_vars = "REGION",
+  nombre_decil = "dec_region", peso = "Fexp", grupos = 10, desempate = "Identif_hog")
+datos_hogar <- calcular_ntiles_spss_por_grupo(
+  data = datos_hogar, variable = "ing_cor_per", grupo_vars = "REGION",
+  nombre_decil = "cua_region", peso = "Fexp", grupos = 4, desempate = "Identif_hog")
+
+# Por cantón autorrepresentado (para Ambato)
+datos_hogar <- calcular_ntiles_spss_por_grupo(
+  data = datos_hogar, variable = "ing_cor_per", grupo_vars = "cant_auto",
+  nombre_decil = "dec_canton", peso = "Fexp", grupos = 10, desempate = "Identif_hog")
+datos_hogar <- calcular_ntiles_spss_por_grupo(
+  data = datos_hogar, variable = "ing_cor_per", grupo_vars = "cant_auto",
+  nombre_decil = "cua_canton", peso = "Fexp", grupos = 4, desempate = "Identif_hog")
+
+# Por provincia (para Sucumbíos y Carchi a la vez)
+datos_hogar <- calcular_ntiles_spss_por_grupo(
+  data = datos_hogar, variable = "ing_cor_per", grupo_vars = "PROVINCIA",
+  nombre_decil = "dec_provincia", peso = "Fexp", grupos = 10, desempate = "Identif_hog")
+datos_hogar <- calcular_ntiles_spss_por_grupo(
+  data = datos_hogar, variable = "ing_cor_per", grupo_vars = "PROVINCIA",
+  nombre_decil = "cua_provincia", peso = "Fexp", grupos = 4, desempate = "Identif_hog")
+```
+
+# Diseño muestral (uno solo, nacional)
+
+```{r, warning=FALSE}
+diseno_nacional <- datos_hogar %>% as_survey_design(
+  ids = Identif_upm,
+  strata = estrato,
+  weights = Fexp
+)
+```
+
+# Definición de los 5 territorios del Grupo 12
+
+Cada territorio se obtiene con `filter()` sobre el **mismo** diseño
+nacional (estimación por dominio) — nunca creando un diseño nuevo
+sobre un data.frame ya recortado. Esto conserva la estructura de
+estratos/UPM y da errores estándar / CV correctos, aun para
+territorios chicos como un cantón o una sola provincia.
+
+```{r, warning=FALSE}
+territorios_spec <- list(
+  list(nombre = "Nacional",            filtro_var = NULL,        filtro_valor = NULL,
+       col_decil = "dec_nacional", col_cuartil = "cua_nacional"),
+  list(nombre = "Región Sierra",       filtro_var = "REGION",    filtro_valor = "Sierra",
+       col_decil = "dec_region",   col_cuartil = "cua_region"),
+  list(nombre = "Cantón Ambato",       filtro_var = "cant_auto", filtro_valor = "Ambato",
+       col_decil = "dec_canton",   col_cuartil = "cua_canton"),
+  list(nombre = "Provincia Sucumbíos", filtro_var = "PROVINCIA", filtro_valor = "Sucumbios",
+       col_decil = "dec_provincia", col_cuartil = "cua_provincia"),
+  list(nombre = "Provincia Carchi",    filtro_var = "PROVINCIA", filtro_valor = "Carchi",
+       col_decil = "dec_provincia", col_cuartil = "cua_provincia")
+)
+
+nombres_orden <- sapply(territorios_spec, function(x) x$nombre)
+
+procesar_territorio <- function(diseno_completo, spec) {
+
+  if (!is.null(spec$filtro_var)) {
+    diseno_dom <- diseno_completo %>% filter(.data[[spec$filtro_var]] == spec$filtro_valor)
+  } else {
+    diseno_dom <- diseno_completo
+  }
+
+  if (nrow(diseno_dom$variables) == 0) {
+    stop(paste0("El filtro para '", spec$nombre,
+                "' no encontró filas. Revisa el nombre exacto de la etiqueta."))
+  }
+
+  datos_sub <- diseno_dom$variables
+  col_decil <- spec$col_decil
+  col_cuartil <- spec$col_cuartil
+
+  media_svy <- diseno_dom %>% summarise(
+    Media = survey_mean(ing_cor_per, vartype = c("se", "cv"), na.rm = TRUE)
+  )
+  colnames(media_svy)[2:3] <- c("Error estándar", "Coeficiente de variación")
+
+  resumen <- datos_sub %>%
+    summarise(
+      "Media"           = sum(ing_cor_per * Fexp, na.rm = TRUE) / sum(Fexp, na.rm = TRUE),
+      "Desviacion"      = sqrt(sum(Fexp * (ing_cor_per - Media)^2, na.rm = TRUE) / sum(Fexp, na.rm = TRUE)),
+      "Q1"              = max(ing_cor_per[.data[[col_cuartil]] == 1], na.rm = TRUE),
+      "Q2"              = max(ing_cor_per[.data[[col_cuartil]] == 2], na.rm = TRUE),
+      "Q3"              = max(ing_cor_per[.data[[col_cuartil]] == 3], na.rm = TRUE),
+      "Decil 1"         = max(ing_cor_per[.data[[col_decil]] == 1], na.rm = TRUE),
+      "Decil 2"         = max(ing_cor_per[.data[[col_decil]] == 2], na.rm = TRUE),
+      "Decil 3"         = max(ing_cor_per[.data[[col_decil]] == 3], na.rm = TRUE),
+      "Decil 4"         = max(ing_cor_per[.data[[col_decil]] == 4], na.rm = TRUE),
+      "Decil 5"         = max(ing_cor_per[.data[[col_decil]] == 5], na.rm = TRUE),
+      "Decil 6"         = max(ing_cor_per[.data[[col_decil]] == 6], na.rm = TRUE),
+      "Decil 7"         = max(ing_cor_per[.data[[col_decil]] == 7], na.rm = TRUE),
+      "Decil 8"         = max(ing_cor_per[.data[[col_decil]] == 8], na.rm = TRUE),
+      "Decil 9"         = max(ing_cor_per[.data[[col_decil]] == 9], na.rm = TRUE),
+      "Max"             = max(ing_cor_per, na.rm = TRUE),
+      "Mín"             = min(ing_cor_per, na.rm = TRUE),
+      "RI"              = Q3 - Q1,
+      "lim_sup_teorico" = Q3 + 1.5 * RI,
+      "lim_inf_teorico" = Q1 - 1.5 * RI,
+      "LS"              = pmin(Max, lim_sup_teorico),
+      "LI"              = pmax(Mín, lim_inf_teorico),
+      "N"               = sum(Fexp),
+      "n"               = n()
+    )
+
+  resumen$Grupo <- spec$nombre
+  resumen <- cbind(resumen, media_svy[, c("Error estándar", "Coeficiente de variación")])
+
+  list(resumen = resumen, diseno = diseno_dom, col_decil = col_decil, nombre = spec$nombre)
+}
+
+resultados <- lapply(territorios_spec, function(sp) procesar_territorio(diseno_nacional, sp))
+names(resultados) <- nombres_orden
+
+resumen_general <- do.call(rbind, lapply(resultados, function(x) x$resumen))
+resumen_general$Grupo <- factor(resumen_general$Grupo, levels = nombres_orden)
+resumen_general <- resumen_general[order(resumen_general$Grupo), ]
+```
+
+# Punto 1: Tamaño muestral y expandido por territorio
+
+```{r, warning=FALSE}
+tamano <- resumen_general[, c("Grupo", "n", "N")]
+write.xlsx(tamano, "tamano_grupo12.xlsx")
+tamano
+```
+
+# Punto 5: Tabla de medidas estadísticas
+
+```{r, warning=FALSE}
+medidas <- resumen_general %>%
+  select(Grupo, Media, Mín, LI, Q1, Q2, Q3, LS, Max, `Error estándar`,
+         Desviacion, `Coeficiente de variación`,
+         `Decil 1`, `Decil 2`, `Decil 3`, `Decil 4`, `Decil 5`,
+         `Decil 6`, `Decil 7`, `Decil 8`, `Decil 9`) %>%
+  pivot_longer(names_to = "Medidas", values_to = "Valor", cols = -Grupo) %>%
+  pivot_wider(names_from = "Grupo", values_from = "Valor")
+
+write.xlsx(medidas, "medidas_grupo12.xlsx")
+medidas
+```
+
+# Punto 3: Diagrama de caja y bigote
+
+```{r, warning=FALSE}
+resumen_caja <- resumen_general %>%
+  select(-c(RI, lim_sup_teorico, lim_inf_teorico, n, N, paste("Decil", 1:9)))
+
+etiquetas_caja <- resumen_caja %>%
+  pivot_longer(cols = -Grupo, names_to = "Medida", values_to = "Valor") %>%
+  mutate(Posicion_X = ifelse(Medida %in% c("Desviacion", "Error estándar",
+                                            "Coeficiente de variación"), 1, 1.42))
+```
+
+```{r, warning=FALSE}
+showtext_auto()
+
+calcular_grafico_box_grupo <- function(resumen_estadistico, etiquetas_boxplot) {
+
+  fuente_grafico <- "Century Gothic"
+
+  etiquetas_boxplot$etiqueta_html <- case_when(
+    etiquetas_boxplot$Medida == "Coeficiente de variación" ~
+      paste0("<b>CV:</b> ", round(etiquetas_boxplot$Valor * 100, 2), "%"),
+    etiquetas_boxplot$Medida == "Desviacion" ~
+      paste0("<b>s:</b> ", round(etiquetas_boxplot$Valor, 1)),
+    etiquetas_boxplot$Medida == "Error estándar" ~
+      paste0("<b>SE:</b> ", round(etiquetas_boxplot$Valor, 1)),
+    etiquetas_boxplot$Medida == "Max" ~
+      paste0("<b>Max:</b> ", round(etiquetas_boxplot$Valor, 1)),
+    etiquetas_boxplot$Medida == "Mín" ~
+      paste0("<b>Mín:</b> ", round(etiquetas_boxplot$Valor, 1)),
+    TRUE ~
+      paste0("<b>", etiquetas_boxplot$Medida, ":</b> ", round(etiquetas_boxplot$Valor, 1))
+  )
+
+  resumen_estadistico$Grupo_Num <- as.numeric(as.factor(resumen_estadistico$Grupo))
+
+  etiquetas_boxplot <- etiquetas_boxplot %>%
+    left_join(unique(resumen_estadistico[, c("Grupo", "Grupo_Num", "LS", "LI", "Q1", "Q3")]), by = "Grupo")
+
+  grupos_unicos   <- unique(resumen_estadistico$Grupo)
+  colores_borde   <- c("#1B365D", "#0F766E", "#B45309", "#6B21A8", "#3F6212")
+  colores_relleno <- c("#E8EEF5", "#CCFBFC", "#FEF3C7", "#F3E8FF", "#ECFDF5")
+
+  vector_colores_borde   <- setNames(colores_borde[1:length(grupos_unicos)], grupos_unicos)
+  vector_colores_relleno <- setNames(colores_relleno[1:length(grupos_unicos)], grupos_unicos)
+
+  grafico_box <- ggplot(resumen_estadistico) +
+    geom_errorbar(aes(x = Grupo_Num, ymin = LI, ymax = LS, color = Grupo),
+                  width = 0.15, linewidth = 0.6) +
+    geom_rect(aes(xmin = Grupo_Num - 0.25, xmax = Grupo_Num + 0.25, ymin = Q1, ymax = Q3,
+                  fill = Grupo, color = Grupo),
+              linewidth = 0.8) +
+    geom_segment(aes(x = Grupo_Num - 0.25, xend = Grupo_Num + 0.25, y = Q2, yend = Q2, color = Grupo),
+                 linewidth = 1.3) +
+    geom_richtext(data = etiquetas_boxplot,
+                  aes(x = Grupo_Num + 0.3,
+                      y = case_when(
+                        Medida == "Max"                       ~ LS + 50,
+                        Medida == "Mín"                       ~ LI - 50,
+                        Medida == "Desviacion"                ~ LI - 100,
+                        Medida == "Error estándar"             ~ LI - 150,
+                        Medida == "Coeficiente de variación"   ~ LI - 200,
+                        TRUE                                   ~ Valor
+                      ),
+                      label = etiqueta_html),
+                  hjust = 0, size = 3.6, color = "black", family = fuente_grafico,
+                  fill = NA, label.color = NA, label.padding = grid::unit(0, "lines")) +
+    labs(title = NULL, x = "Grupo", y = "Ingreso corriente per cápita",
+         caption = "Fuente: INEC (2026). Encuesta Nacional de Ingresos y Gastos de los Hogares Urbanos y Rurales (ENIGHUR), 2024-2025") +
+    scale_x_continuous(breaks = unique(resumen_estadistico$Grupo_Num),
+                       labels = unique(resumen_estadistico$Grupo),
+                       limits = c(0.6, max(resumen_estadistico$Grupo_Num) + 0.65)) +
+    scale_y_continuous(labels = scales::label_comma()) +
+    scale_color_manual(values = vector_colores_borde) +
+    scale_fill_manual(values = vector_colores_relleno) +
+    theme_minimal(base_family = fuente_grafico) +
+    theme(
+      panel.grid.major.x = element_blank(),
+      panel.grid.minor.x = element_blank(),
+      panel.grid.major.y = element_line(color = "#f6f4f2", linewidth = 0.6),
+      panel.grid.minor.y = element_blank(),
+      panel.border = element_rect(color = "#e5d8cd", fill = NA, linewidth = 0.8),
+      axis.text.x = element_text(color = "black", size = 11, face = "bold", family = fuente_grafico),
+      axis.title.x = element_text(color = "#ba4a00", face = "bold", size = 12, margin = margin(t = 12), family = fuente_grafico),
+      axis.text.y = element_text(color = "black", size = 11, family = fuente_grafico),
+      axis.title.y = element_text(color = "#ba4a00", face = "bold", size = 12, margin = margin(r = 12), family = fuente_grafico),
+      legend.position = "none"
+    )
+
+  return(grafico_box)
+}
+
+resumen_general$Grupo <- factor(resumen_general$Grupo, levels = nombres_orden)
+etiquetas_caja$Grupo  <- factor(etiquetas_caja$Grupo, levels = nombres_orden)
+
+mi_boxplot_grupo12 <- calcular_grafico_box_grupo(resumen_general, etiquetas_caja)
+mi_boxplot_grupo12
+```
+
+# Punto 4: Ojiva
+
+```{r, warning=FALSE}
+resumen_territorio2 <- resumen_general %>%
+  select(-any_of(c("RI", "lim_sup_teorico", "lim_inf_teorico", "LI",
+                    "Media", "Q1", "Q3", "Q2")))
+
+etiquetas_territorio2 <- resumen_territorio2 %>%
+  pivot_longer(cols = -Grupo, names_to = "Medida", values_to = "Valor")
+
+etiquetas_territorio3 <- etiquetas_territorio2 %>%
+  filter(Medida %in% c("Mín", paste("Decil", 1:9), "Max", "LS")) %>%
+  arrange(Grupo, Valor)
+
+etiquetas_territorio4 <- etiquetas_territorio3 %>%
+  group_by(Grupo) %>%
+  group_modify(~ bind_rows(.x, data.frame(Medida = "FIN", Valor = 1600))) %>%
+  ungroup()
+
+datos_unir <- data.frame(
+  Medida = c("Mín", paste("Decil", 1:9), "Max", "LS", "FIN"),
+  Porcentaje_Acumulado = c(seq(0, 1, by = 0.1), 1, 1)
+)
+
+datos_deciles <- left_join(etiquetas_territorio4, datos_unir, by = "Medida")
+
+datos_deciles <- datos_deciles %>%
+  group_by(Grupo) %>%
+  mutate(
+    v_decil9 = Valor[Medida == "Decil 9"][1],
+    v_decil8 = Valor[Medida == "Decil 8"][1],
+    Valor = ifelse(Medida == "LS", (v_decil9 * v_decil9) / v_decil8, Valor)
+  ) %>%
+  select(-v_decil9, -v_decil8) %>%
+  ungroup()
+```
+
+```{r, warning=FALSE}
+calcular_ojiva_deciles_grupo <- function(datos_deciles, grupo) {
+
+  fuente_grafico <- "Century Gothic"
+
+  datos_deciles$Grupo <- as.character(datos_deciles$Grupo)
+  grupos_originales <- unique(datos_deciles$Grupo)
+  n_grupos <- length(grupos_originales)
+
+  colores_profesionales <- c("#1B365D", "#0F766E", "#B45309", "#6B21A8", "#3F6212")
+  if (n_grupos > length(colores_profesionales)) {
+    colores_profesionales <- rep(colores_profesionales, length.out = n_grupos)
+  }
+  paleta_grupos <- setNames(colores_profesionales[1:n_grupos], grupos_originales)
+
+  datos_grafico <- subset(datos_deciles, Medida != "Max")
+  datos_maximo  <- subset(datos_deciles, Medida == "Max")
+
+  datos_max_ordenados <- as.data.frame(datos_maximo) %>% arrange(Valor)
+
+  anotaciones_maximos <- lapply(1:nrow(datos_max_ordenados), function(i) {
+    g_nombre <- as.character(datos_max_ordenados$Grupo[i])
+    g_valor  <- datos_max_ordenados$Valor[i]
+    g_color  <- paleta_grupos[g_nombre]
+    g_texto  <- paste0("Máx ", g_nombre, ": ", scales::comma(g_valor, accuracy = 0.1))
+    pos_y <- 0.03 + (i - 1) * 0.05
+
+    annotation_custom(
+      grob = textGrob(label = g_texto, x = unit(0.97, "npc"), y = unit(pos_y, "npc"),
+                      just = c("right", "bottom"),
+                      gp = gpar(col = g_color, fontfamily = fuente_grafico, fontface = "bold", fontsize = 10.5))
+    )
+  })
+
+  grafico_ojiva <- ggplot(datos_grafico,
+                          aes(x = Valor, y = Porcentaje_Acumulado, color = Grupo, group = Grupo)) +
+    geom_line(linewidth = 1.2) +
+    geom_point(size = 2.5, shape = 16) +
+    anotaciones_maximos +
+    labs(
+      title = "Distribución del Ingreso Corriente Per Cápita",
+      x = "Ingreso Corriente Per Cápita",
+      y = "Frecuencia Relativa Acumulada",
+      caption = "Fuente: INEC (2026). Encuesta Nacional de Ingresos y Gastos de los Hogares Urbanos y Rurales (ENIGHUR), 2024-2025",
+      color = grupo
+    ) +
+    scale_x_continuous(limits = c(0, 1600), breaks = seq(0, 1400, by = 200), labels = scales::label_comma()) +
+    scale_y_continuous(labels = scales::label_comma(), breaks = seq(0, 1, by = 0.1), limits = c(0, 1.05)) +
+    scale_color_manual(values = paleta_grupos) +
+    theme_minimal(base_family = fuente_grafico) +
+    theme(
+      panel.grid.major.y = element_line(color = "#f6f4f2", linewidth = 0.6),
+      panel.grid.minor.y = element_blank(),
+      panel.grid.major.x = element_line(color = "#f6f4f2", linewidth = 0.6),
+      panel.grid.minor.x = element_blank(),
+      panel.border = element_rect(color = "#e5d8cd", fill = NA, linewidth = 0.8),
+      plot.title = element_text(face = "bold", size = 14, color = "#1B365D", margin = margin(b = 15)),
+      axis.text.x = element_text(color = "#7a6b5d", size = 10),
+      axis.text.y = element_text(color = "#7a6b5d", size = 10),
+      axis.title.x = element_text(color = "#1B365D", face = "bold", size = 11, margin = margin(t = 12)),
+      axis.title.y = element_text(color = "#1B365D", face = "bold", size = 10, margin = margin(r = 12)),
+      legend.position = "right",
+      legend.title = element_text(face = "bold", size = 10, color = "#1B365D"),
+      legend.text = element_text(size = 10, color = "#5e5043")
+    )
+
+  return(grafico_ojiva)
+}
+
+mi_ojiva_grupo12 <- calcular_ojiva_deciles_grupo(datos_deciles, "Territorio")
+mi_ojiva_grupo12
+```
+
+# Punto 6: Gasto de consumo por deciles de ingreso corriente per cápita
+
+```{r, warning=FALSE}
+calcular_gasto_decil <- function(diseno_dom, col_decil, nombre_grupo) {
+  resumen <- diseno_dom %>%
+    group_by(decil_tmp = !!sym(col_decil)) %>%
+    summarise(
+      gasto_consumo = survey_mean(gas_gru_cor, vartype = c("se", "ci", "cv"),
+                                   deff = FALSE, na.rm = TRUE),
+      .groups = "drop"
+    )
+  resumen$Grupo <- nombre_grupo
+
+  promedio <- diseno_dom %>%
+    summarise(Media = survey_mean(gas_gru_cor, na.rm = TRUE)) %>%
+    pull(Media)
+  resumen$Media <- promedio
+
+  colnames(resumen)[colnames(resumen) == "decil_tmp"] <- "Decil"
+  colnames(resumen)[colnames(resumen) == "gasto_consumo"] <- "valor"
+  resumen
+}
+
+tabla_gastos_sel <- do.call(rbind, lapply(resultados, function(x) {
+  calcular_gasto_decil(x$diseno, x$col_decil, x$nombre)
+}))
+```
+
+```{r, warning=FALSE}
+font_add(family = "Century Gothic", regular = "gothic.ttf", bold = "gothicb.ttf")
+showtext_auto()
+
+diagrama_de_barras <- function(tabla_resumen, nombre_territorio, color) {
+
+  tabla_resumen <- tabla_resumen[tabla_resumen$Grupo == nombre_territorio, ]
+  promedio_territorio <- unique(tabla_resumen$Media)[1]
+  max_y <- max(tabla_resumen$valor, na.rm = TRUE) * 1.15
+  fuente_elegida <- "Century Gothic"
+
+  g <- ggplot(tabla_resumen, aes(x = factor(Decil), y = valor)) +
+    geom_col(fill = color, width = 0.4) +
+    geom_text(aes(label = scales::comma(valor)),
+              vjust = -0.7, color = "black", size = 3.2, family = fuente_elegida) +
+    geom_hline(yintercept = promedio_territorio, color = "#7f8c8d", linewidth = 0.8) +
+    annotate("text", x = 2, y = promedio_territorio + 200,
+             label = paste("Promedio:", round(promedio_territorio, 1)), color = "#7f8c8d",
+             fontface = "bold", size = 3.5, family = fuente_elegida) +
+    labs(title = nombre_territorio, x = NULL, y = NULL) +
+    scale_x_discrete(labels = paste("Decil", 1:10)) +
+    scale_y_continuous(limits = c(0, max_y), labels = scales::comma) +
+    theme_minimal(base_family = fuente_elegida) +
+    theme(
+      plot.background = element_rect(fill = "white", color = NA),
+      panel.background = element_rect(fill = "white", color = NA),
+      panel.grid = element_blank(),
+      axis.text.x = element_text(color = "#2c3e50", size = 10, vjust = 1, fontface = "bold"),
+      axis.text.y = element_text(color = "white", size = 10),
+      axis.line.x = element_blank(),
+      plot.title = element_text(color = "#2c3e50", size = 13, face = "bold",
+                                hjust = 0.5, margin = margin(b = 15))
+    )
+  return(g)
+}
+
+colores <- c("#1B365D", "#0F766E", "#B45309", "#6B21A8", "#3F6212")
+
+graficos_gasto <- mapply(function(grupo, color) {
+  diagrama_de_barras(tabla_gastos_sel, grupo, color)
+}, nombres_orden, colores, SIMPLIFY = FALSE)
+
+grafico_gastos_consumo <- wrap_plots(graficos_gasto, ncol = 2) +
+  plot_annotation(
+    title = "Gasto de consumo por deciles de ingreso per cápita",
+    caption = "Fuente: INEC (2026). ENIGHUR 2024-2025. Elaboración propia.",
+    theme = theme(plot.title = element_text(family = "Century Gothic",
+                                             face = "bold", size = 22,
+                                             hjust = 0.5, color = "#2c3e50"))
+  )
+
+grafico_gastos_consumo
+```
+
+# Punto 7: Barras apiladas — estructura del gasto (Deciles 1, 5 y 10)
+
+```{r, warning=FALSE}
+resumen_consumo <- function(diseno_dom, col_decil, nombre_grupo) {
+  resumen <- diseno_dom %>%
+    group_by(decil_tmp = !!sym(col_decil)) %>%
+    summarise(
+      d1  = survey_mean(d1,  vartype = c("se","ci","cv"), deff = FALSE, na.rm = TRUE),
+      d2  = survey_mean(d2,  vartype = c("se","ci","cv"), deff = FALSE, na.rm = TRUE),
+      d3  = survey_mean(d3,  vartype = c("se","ci","cv"), deff = FALSE, na.rm = TRUE),
+      d4  = survey_mean(d4,  vartype = c("se","ci","cv"), deff = FALSE, na.rm = TRUE),
+      d5  = survey_mean(d5,  vartype = c("se","ci","cv"), deff = FALSE, na.rm = TRUE),
+      d6  = survey_mean(d6,  vartype = c("se","ci","cv"), deff = FALSE, na.rm = TRUE),
+      d7  = survey_mean(d7,  vartype = c("se","ci","cv"), deff = FALSE, na.rm = TRUE),
+      d8  = survey_mean(d8,  vartype = c("se","ci","cv"), deff = FALSE, na.rm = TRUE),
+      d9  = survey_mean(d9,  vartype = c("se","ci","cv"), deff = FALSE, na.rm = TRUE),
+      d10 = survey_mean(d10, vartype = c("se","ci","cv"), deff = FALSE, na.rm = TRUE),
+      d11 = survey_mean(d11, vartype = c("se","ci","cv"), deff = FALSE, na.rm = TRUE),
+      d12 = survey_mean(d12, vartype = c("se","ci","cv"), deff = FALSE, na.rm = TRUE),
+      d13 = survey_mean(d13, vartype = c("se","ci","cv"), deff = FALSE, na.rm = TRUE),
+      .groups = "drop"
+    )
+
+  resumen_b <- resumen[, -1]
+  patron <- "(_se|_cv|_upp|_low)$"
+  colnames(resumen_b)[!grepl(patron, colnames(resumen_b))] <-
+    paste0(colnames(resumen_b)[!grepl(patron, colnames(resumen_b))], "_valor")
+
+  resumen <- cbind(resumen[, 1], resumen_b)
+
+  tabla <- resumen %>%
+    pivot_longer(
+      cols = -decil_tmp,
+      names_to = c("Indicador", ".value"),
+      names_pattern = "(.*)_(valor|se|low|upp|cv)$"
+    )
+
+  nombres_divisiones <- c(
+    "d1"  = "Alimentos y bebidas no alcohólicas",
+    "d2"  = "Bebidas alcohólicas, tabaco y estupefacientes",
+    "d3"  = "Prendas de vestir y calzado",
+    "d4"  = "Vivienda, agua, electricidad, gas y otros combustibles",
+    "d5"  = "Muebles, artículos para el hogar y para la conservación ordinaria del hogar",
+    "d6"  = "Salud",
+    "d7"  = "Transporte",
+    "d8"  = "Información y comunicación",
+    "d9"  = "Recreación, deporte y cultura",
+    "d10" = "Servicios Educativos",
+    "d11" = "Servicios de restaurantes y alojamientos",
+    "d12" = "Seguros y servicios financieros",
+    "d13" = "Cuidado personal, previsión social y bienes y servicios diversos"
+  )
+  tabla$Indicador <- nombres_divisiones[tabla$Indicador]
+  colnames(tabla)[colnames(tabla) == "decil_tmp"] <- "Decil"
+  tabla$Grupo <- nombre_grupo
+  tabla
+}
+
+tabla_consumos_sel <- do.call(rbind, lapply(resultados, function(x) {
+  resumen_consumo(x$diseno, x$col_decil, x$nombre)
+}))
+```
+
+```{r, warning=FALSE}
+colores_corp_pastel <- c(
+  '#4A7BB0', '#72A2D1', '#99BCE2', '#89C2A1',
+  '#E59E8D', '#F9B77F', '#F3CB62', '#A19C6E', '#8292A1',
+  '#A960D3', '#68A0A0', '#8A8A8A', '#D4A5A5'
+)
+
+df_barras_listo <- tabla_consumos_sel %>%
+  group_by(Grupo, Decil) %>%
+  mutate(total = sum(valor, na.rm = TRUE), porcentaje_real = valor / total) %>%
+  ungroup() %>%
+  filter(Decil %in% c(1, 5, 10)) %>%
+  mutate(decil_factor = factor(paste("Decil", Decil),
+                               levels = c("Decil 1", "Decil 5", "Decil 10")),
+         Grupo = factor(Grupo, levels = nombres_orden)) %>%
+  group_by(Grupo, decil_factor) %>%
+  mutate(
+    ranking = min_rank(desc(porcentaje_real)),
+    etiqueta_texto = ifelse(ranking <= 5, paste0(round(porcentaje_real * 100, 1), "%"), "")
+  ) %>%
+  ungroup()
+
+showtext_auto()
+fuente_grafico <- "Century Gothic"
+
+estructura_consumo <- ggplot(df_barras_listo, aes(x = decil_factor, y = porcentaje_real, fill = Indicador)) +
+  geom_col(position = "stack", width = 0.5) +
+  geom_text(aes(label = etiqueta_texto), position = position_stack(vjust = 0.5),
+            size = 2.8, color = "black") +
+  facet_grid(Grupo ~ ., scales = "free_y") +
+  scale_y_continuous(name = "Estructura del Gasto (%)",
+                      labels = scales::percent_format(accuracy = 1),
+                      limits = c(0, 1.001), expand = c(0, 0), breaks = seq(0, 1, by = 0.2)) +
+  scale_fill_manual(values = colores_corp_pastel, name = "Estructura del Gasto") +
+  labs(
+    title = "Composición del gasto en los hogares - Grupo 12",
+    subtitle = "Estructura porcentual del gasto por territorio para los deciles 1, 5 y 10",
+    x = "Deciles de Ingreso Per Cápita",
+    caption = "Fuente: INEC (2026). ENIGHUR 2024-2025. Elaboración propia."
+  ) +
+  theme_minimal(base_family = fuente_grafico) +
+  theme(
+    plot.title = element_text(face = "bold", size = 12, hjust = 0),
+    plot.subtitle = element_text(size = 9, color = "#555555", margin = margin(b = 15)),
+    plot.caption = element_text(size = 8, color = "#666666", hjust = 0, margin = margin(t = 20)),
+    strip.text.y = element_text(size = 9, face = "bold", angle = 0, color = "#2c3e50"),
+    strip.background = element_rect(fill = "#F2F2F2", color = NA),
+    legend.position = "right",
+    panel.spacing = unit(1.5, "lines"),
+    panel.grid.minor = element_blank(),
+    panel.grid.major.x = element_blank()
+  )
+
+estructura_consumo
+```
+```{r}
+library(gridExtra)
+
+# Formatear la tabla de medidas (redondear decimales)
+medidas_fmt <- medidas
+medidas_fmt[,-1] <- lapply(medidas_fmt[,-1], function(x) round(as.numeric(x), 1))
+
+# Tema visual de la tabla
+tema_tabla <- ttheme_minimal(
+  core = list(fg_params = list(fontsize = 9)),
+  colhead = list(fg_params = list(fontsize = 9, fontface = "bold"))
+)
+
+# Exportar tabla de tamaño muestral
+png("tamano_grupo12.png", width = 1400, height = 500, res = 200)
+grid.arrange(tableGrob(tamano, rows = NULL, theme = tema_tabla))
+dev.off()
+
+# Exportar tabla de medidas estadísticas
+png("medidas_grupo12.png", width = 2600, height = 2200, res = 200)
+grid.arrange(tableGrob(medidas_fmt, rows = NULL, theme = tema_tabla))
+dev.off()
+list.files(pattern = "grupo12.png")
+```
